@@ -1,9 +1,11 @@
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
+warnings.simplefilter(action='ignore', category=UserWarning)
 import itertools
 import os
 import time
 import argparse
+from datetime import datetime
 import json
 import torch
 import torch.nn.functional as F
@@ -25,38 +27,11 @@ from academicodec.models.hificodec.models import generator_loss
 from academicodec.models.hificodec.models import discriminator_loss
 from academicodec.models.hificodec.models import Encoder
 from academicodec.models.hificodec.models import Quantizer
-from academicodec.utils import plot_spectrogram
 from academicodec.utils import scan_checkpoint
 from academicodec.utils import load_checkpoint
 from academicodec.utils import save_checkpoint
 
 torch.backends.cudnn.benchmark = True
-
-
-def reconstruction_loss(x, G_x, device, eps=1e-7):
-    L = 100 * F.mse_loss(x, G_x)  # wav L1 loss
-    for i in range(6, 11):
-        s = 2**i
-        melspec = MelSpectrogram(
-            sample_rate=24000,
-            n_fft=s,
-            hop_length=s // 4,
-            n_mels=64,
-            wkwargs={"device": device}).to(device)
-        # 64, 16, 64
-        # 128, 32, 128
-        # 256, 64, 256
-        # 512, 128, 512
-        # 1024, 256, 1024
-        S_x = melspec(x)
-        S_G_x = melspec(G_x)
-        loss = ((S_x - S_G_x).abs().mean() + (
-            ((torch.log(S_x.abs() + eps) - torch.log(S_G_x.abs() + eps))**2
-             ).mean(dim=-2)**0.5).mean()) / (i)
-        L += loss
-        #print('i ,loss ', i, loss)
-    #assert 1==2
-    return L
 
 
 def train(rank, a, h):
@@ -78,9 +53,6 @@ def train(rank, a, h):
     msd = MultiScaleDiscriminator().to(device)
     mstftd = MultiScaleSTFTDiscriminator(32).to(device)
     if rank == 0:
-        print(encoder)
-        print(quantizer)
-        print(generator)
         os.makedirs(a.checkpoint_path, exist_ok=True)
         print("checkpoints directory : ", a.checkpoint_path)
 
@@ -103,6 +75,31 @@ def train(rank, a, h):
         mstftd.load_state_dict(state_dict_do['mstftd'])
         steps = state_dict_do['steps'] + 1
         last_epoch = state_dict_do['epoch']
+
+    if a.pretrain_path:
+        state_dict_pretrain = load_checkpoint(a.pretrain_path, device)
+        if 'generator' in state_dict_pretrain.keys():
+            cmd = generator.state_dict()
+            lsd = state_dict_pretrain['generator']
+            nsd={k:v if v.size() == cmd[k].size() else cmd[k] for k,v in zip(cmd.keys(), lsd.values())}
+            
+            generator.load_state_dict(nsd, strict=False)
+            print(f'Generator loaded from {a.pretrain_path}.')
+        if 'encoder' in state_dict_pretrain.keys():
+            cmd = encoder.state_dict()
+            lsd = state_dict_pretrain['encoder']
+            nsd={k:v if v.size() == cmd[k].size() else cmd[k] for k,v in zip(cmd.keys(), lsd.values())}
+            
+            encoder.load_state_dict(nsd, strict=False)
+            print(f'Encoder loaded from {a.pretrain_path}.')
+        if 'quantizer' in state_dict_pretrain.keys():
+            cmd = quantizer.state_dict()
+            lsd = state_dict_pretrain['quantizer']
+            nsd={k:v if v.size() == cmd[k].size() else cmd[k] for k,v in zip(cmd.keys(), lsd.values())}
+            
+            quantizer.load_state_dict(nsd, strict=False)
+            print(f'Quantizer loaded from {a.pretrain_path}.')
+        
 
     if h.num_gpus > 1:
         generator = DistributedDataParallel(
@@ -133,10 +130,13 @@ def train(rank, a, h):
     scheduler_d = torch.optim.lr_scheduler.ExponentialLR(
         optim_d, gamma=h.lr_decay, last_epoch=last_epoch)
 
-    training_filelist, validation_filelist = get_dataset_filelist(a)
+    training_filelist, _ = get_dataset_filelist(a)
+
+    print("Number of training samples:", len(training_filelist))
 
     trainset = MelDataset(
         training_filelist,
+        a.input_hash_file,
         h.segment_size,
         h.n_fft,
         h.num_mels,
@@ -164,33 +164,8 @@ def train(rank, a, h):
         drop_last=True)
 
     if rank == 0:
-        validset = MelDataset(
-            validation_filelist,
-            h.segment_size,
-            h.n_fft,
-            h.num_mels,
-            h.hop_size,
-            h.win_size,
-            h.sampling_rate,
-            h.fmin,
-            h.fmax,
-            False,
-            False,
-            n_cache_reuse=0,
-            fmax_loss=h.fmax_for_loss,
-            device=device,
-            fine_tuning=a.fine_tuning,
-            base_mels_path=a.input_mels_dir)
-        validation_loader = DataLoader(
-            validset,
-            num_workers=1,
-            shuffle=False,
-            sampler=None,
-            batch_size=1,
-            pin_memory=True,
-            drop_last=True)
         sw = SummaryWriter(os.path.join(a.checkpoint_path, 'logs'))
-    plot_gt_once = False
+        print("Done create dataset!")
     generator.train()
     encoder.train()
     quantizer.train()
@@ -203,8 +178,6 @@ def train(rank, a, h):
         if h.num_gpus > 1:
             train_sampler.set_epoch(epoch)
         for i, batch in enumerate(train_loader):
-            if rank == 0:
-                start_b = time.time()
             x, y, _, y_mel = batch
             x = torch.autograd.Variable(x.to(device, non_blocking=True))
             y = torch.autograd.Variable(y.to(device, non_blocking=True))
@@ -212,9 +185,9 @@ def train(rank, a, h):
             y = y.unsqueeze(1)
 
             c = encoder(y)
-            # print("c.shape: ", c.shape)
+            
             q, loss_q, c = quantizer(c)
-            # print("q.shape: ", q.shape)
+            
             y_g_hat = generator(q)
             y_g_hat_mel = mel_spectrogram(
                 y_g_hat.squeeze(1), h.n_fft, h.num_mels, h.sampling_rate,
@@ -238,9 +211,6 @@ def train(rank, a, h):
             y_g_mel_3 = mel_spectrogram(
                 y_g_hat.squeeze(1), 128, h.num_mels, h.sampling_rate, 30, 128,
                 h.fmin, h.fmax_for_loss)
-            # print("x.shape: ", x.shape)
-            # print("y.shape: ", y.shape)
-            # print("y_g_hat.shape: ", y_g_hat.shape)
             optim_d.zero_grad()
 
             # MPD
@@ -269,11 +239,10 @@ def train(rank, a, h):
             loss_mel1 = F.l1_loss(y_r_mel_1, y_g_mel_1)
             loss_mel2 = F.l1_loss(y_r_mel_2, y_g_mel_2)
             loss_mel3 = F.l1_loss(y_r_mel_3, y_g_mel_3)
-            #print('loss_mel1, loss_mel2 ', loss_mel1, loss_mel2)
+            
             loss_mel = F.l1_loss(y_mel,
                                  y_g_hat_mel) * 45 + loss_mel1 + loss_mel2
-            # print('loss_mel ', loss_mel)
-            # assert 1==2
+            
             y_df_hat_r, y_df_hat_g, fmap_f_r, fmap_f_g = mpd(y, y_g_hat)
             y_ds_hat_r, y_ds_hat_g, fmap_s_r, fmap_s_g = msd(y, y_g_hat)
             y_stftd_hat_r, fmap_stftd_r = mstftd(y)
@@ -293,9 +262,9 @@ def train(rank, a, h):
                     with torch.no_grad():
                         mel_error = F.l1_loss(y_mel, y_g_hat_mel).item()
                     print(
-                        'Steps : {:d}, Gen Loss Total : {:4.3f}, Loss Q : {:4.3f}, Mel-Spec. Error : {:4.3f}, s/b : {:4.3f}'.
-                        format(steps, loss_gen_all, loss_q, mel_error,
-                               time.time() - start_b))
+                        datetime.now().strftime("%b %d %Y %H:%M:%S") + ' | Steps : {:d}/{:d}, Gen Loss Total : {:4.3f}, Loss Q : {:4.3f}, Mel-Spec. Error : {:4.3f}, s/b : {:4.3f}'.
+                        format(steps - epoch * len(train_loader), len(train_loader), loss_gen_all, loss_q, mel_error,
+                               (time.time() - start)/(steps - epoch * len(train_loader) + 1)))
                 # checkpointing
                 if steps % a.checkpoint_interval == 0 and steps != 0:
                     checkpoint_path = "{}/g_{:08d}".format(a.checkpoint_path,
@@ -336,57 +305,6 @@ def train(rank, a, h):
                                   steps)
                     sw.add_scalar("training/mel_spec_error", mel_error, steps)
 
-                # Validation
-                if steps % a.validation_interval == 0 and steps != 0:
-                    generator.eval()
-                    encoder.eval()
-                    quantizer.eval()
-                    torch.cuda.empty_cache()
-                    val_err_tot = 0
-                    with torch.no_grad():
-                        for j, batch in enumerate(validation_loader):
-                            x, y, _, y_mel = batch
-                            c = encoder(y.to(device).unsqueeze(1))
-                            q, loss_q, c = quantizer(c)
-                            y_g_hat = generator(q)
-                            y_mel = torch.autograd.Variable(y_mel.to(device))
-                            y_g_hat_mel = mel_spectrogram(
-                                y_g_hat.squeeze(1), h.n_fft, h.num_mels,
-                                h.sampling_rate, h.hop_size, h.win_size, h.fmin,
-                                h.fmax_for_loss)
-                            i_size = min(y_mel.size(2), y_g_hat_mel.size(2))
-                            val_err_tot += F.l1_loss(
-                                y_mel[:, :, :i_size],
-                                y_g_hat_mel[:, :, :i_size]).item()
-
-                            if j <= 8:
-                                # if steps == 0:
-                                if not plot_gt_once:
-                                    sw.add_audio('gt/y_{}'.format(j), y[0],
-                                                 steps, h.sampling_rate)
-                                    sw.add_figure('gt/y_spec_{}'.format(j),
-                                                  plot_spectrogram(x[0]), steps)
-
-                                sw.add_audio('generated/y_hat_{}'.format(j),
-                                             y_g_hat[0], steps, h.sampling_rate)
-                                y_hat_spec = mel_spectrogram(
-                                    y_g_hat.squeeze(1), h.n_fft, h.num_mels,
-                                    h.sampling_rate, h.hop_size, h.win_size,
-                                    h.fmin, h.fmax)
-                                sw.add_figure(
-                                    'generated/y_hat_spec_{}'.format(j),
-                                    plot_spectrogram(
-                                        y_hat_spec.squeeze(0).cpu().numpy()),
-                                    steps)
-
-                        val_err = val_err_tot / (j + 1)
-                        sw.add_scalar("validation/mel_spec_error", val_err,
-                                      steps)
-                        if not plot_gt_once:
-                            plot_gt_once = True
-
-                    generator.train()
-
             steps += 1
 
         scheduler_g.step()
@@ -402,20 +320,20 @@ def main():
 
     parser = argparse.ArgumentParser()
 
-    # parser.add_argument('--group_name', default=None)
-    # parser.add_argument('--input_wavs_dir', default='../datasets/audios')
     parser.add_argument('--input_mels_dir', default=None)
     parser.add_argument('--input_training_file', required=True)
     parser.add_argument('--input_validation_file', required=True)
+    parser.add_argument('--input_hash_file', required=True)
     parser.add_argument('--checkpoint_path', default='checkpoints')
     parser.add_argument('--config', default='')
-    parser.add_argument('--training_epochs', default=2000, type=int)
-    parser.add_argument('--stdout_interval', default=5, type=int)
+    parser.add_argument('--training_epochs', default=2, type=int)
+    parser.add_argument('--stdout_interval', default=20, type=int)
     parser.add_argument('--checkpoint_interval', default=5000, type=int)
     parser.add_argument('--summary_interval', default=100, type=int)
     parser.add_argument('--validation_interval', default=5000, type=int)
-    parser.add_argument('--num_ckpt_keep', default=5, type=int)
+    parser.add_argument('--num_ckpt_keep', default=100, type=int)
     parser.add_argument('--fine_tuning', default=False, type=bool)
+    parser.add_argument('--pretrain_path', default='', type=str)
 
     a = parser.parse_args()
 

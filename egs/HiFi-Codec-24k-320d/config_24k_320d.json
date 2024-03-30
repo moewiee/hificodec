@@ -1,8 +1,8 @@
 {
     "resblock": "1",
-    "num_gpus": 8,
-    "batch_size": 80,
-    "learning_rate": 0.0002,
+    "num_gpus": 4,
+    "batch_size": 256,
+    "learning_rate": 0.0001,
     "adam_b1": 0.5,
     "adam_b2": 0.9,
     "lr_decay": 0.98,
@@ -24,6 +24,8 @@
     "sampling_rate": 24000,
 
     "n_code_groups": 2,
+    "quantized_vector_size": 128,
+    "n_codebook": 8, 
     "n_codes": 1024,
     "codebook_loss_lambda": 1.0,
     "commitment_loss_lambda": 0.25,
@@ -32,7 +34,7 @@
     "fmax": 8000,
     "fmax_for_loss": null,
 
-    "num_workers": 12,
+    "num_workers": 32,
 
     "dist_config": {
         "dist_backend": "nccl",

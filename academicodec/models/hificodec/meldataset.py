@@ -2,6 +2,7 @@
 import math
 import os
 import random
+import json
 
 import librosa
 import numpy as np
@@ -53,10 +54,12 @@ def mel_spectrogram(y,
                     fmin,
                     fmax,
                     center=False):
-    if torch.min(y) < -1.:
-        print('min value is ', torch.min(y))
-    if torch.max(y) > 1.:
-        print('max value is ', torch.max(y))
+    # if torch.min(y) < -1.:
+    #     print('min value is ', torch.min(y))
+    # if torch.max(y) > 1.:
+    #     print('max value is ', torch.max(y))
+
+    y = torch.clip(y, -1, 1)
 
     global mel_basis, hann_window
     if fmax not in mel_basis:
@@ -80,7 +83,8 @@ def mel_spectrogram(y,
         center=center,
         pad_mode='reflect',
         normalized=False,
-        onesided=True)
+        onesided=True,
+        return_complex=False)
 
     spec = torch.sqrt(spec.pow(2).sum(-1) + (1e-9))
 
@@ -101,6 +105,7 @@ def get_dataset_filelist(a):
 class MelDataset(torch.utils.data.Dataset):
     def __init__(self,
                  training_files,
+                 training_dir_hashes,
                  segment_size,
                  n_fft,
                  num_mels,
@@ -136,9 +141,15 @@ class MelDataset(torch.utils.data.Dataset):
         self.device = device
         self.fine_tuning = fine_tuning
         self.base_mels_path = base_mels_path
+        self.training_dir_hashes = json.load(open(training_dir_hashes))
+        self.training_dir_hashes = {str(value): key for key, value in self.training_dir_hashes.items()}
+
 
     def __getitem__(self, index):
         filename = self.audio_files[index]
+        filename = filename.split("/")
+        filename[0] = self.training_dir_hashes[filename[0]]
+        filename = "/".join(filename)
         if self._cache_ref_count == 0:
             try:
                 # Note by yuantian: load with the sample_rate of config

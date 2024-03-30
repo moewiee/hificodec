@@ -132,7 +132,7 @@ class Generator(torch.nn.Module):
         self.num_kernels = len(h.resblock_kernel_sizes)
         self.num_upsamples = len(h.upsample_rates)
         self.conv_pre = weight_norm(
-            Conv1d(512, h.upsample_initial_channel, 7, 1, padding=3))
+            Conv1d(h.quantized_vector_size, h.upsample_initial_channel, 7, 1, padding=3))
         resblock = ResBlock1 if h.resblock == '1' else ResBlock2
 
         self.ups = nn.ModuleList()
@@ -396,7 +396,7 @@ class Encoder(torch.nn.Module):
                 self.resblocks.append(resblock(h, ch, k, d))
                 self.normalize.append(
                     torch.nn.GroupNorm(ch // 16, ch, eps=1e-6, affine=True))
-        self.conv_post = Conv1d(512, 512, 3, 1, padding=1)
+        self.conv_post = Conv1d(512, h.quantized_vector_size, 3, 1, padding=1)
         self.ups.apply(init_weights)
         self.conv_post.apply(init_weights)
 
@@ -445,51 +445,39 @@ class Quantizer_module(torch.nn.Module):
 class Quantizer(torch.nn.Module):
     def __init__(self, h):
         super(Quantizer, self).__init__()
-        assert 512 % h.n_code_groups == 0
-        self.quantizer_modules = nn.ModuleList([
-            Quantizer_module(h.n_codes, 512 // h.n_code_groups)
-            for _ in range(h.n_code_groups)
-        ])
-        self.quantizer_modules2 = nn.ModuleList([
-            Quantizer_module(h.n_codes, 512 // h.n_code_groups)
-            for _ in range(h.n_code_groups)
-        ])
+        self.quantized_vector_size = h.quantized_vector_size
+        assert self.quantized_vector_size % h.n_code_groups == 0
+        
+        for i in range(h.n_codebook):
+            setattr(self, f"quantizer_blocks_{i}", nn.ModuleList([
+                    Quantizer_module(h.n_codes, self.quantized_vector_size // h.n_code_groups)
+                    for _ in range(h.n_code_groups)
+                ]))
+            
         self.h = h
         self.codebook_loss_lambda = self.h.codebook_loss_lambda  # e.g., 1
         self.commitment_loss_lambda = self.h.commitment_loss_lambda  # e.g., 0.25
-        self.residul_layer = 2
+        self.residual_layer = h.n_codebook
         self.n_code_groups = h.n_code_groups
 
     def for_one_step(self, xin, idx):
         xin = xin.transpose(1, 2)
-        x = xin.reshape(-1, 512)
-        x = torch.split(x, 512 // self.h.n_code_groups, dim=-1)
+        x = xin.reshape(-1, self.quantized_vector_size)
+        x = torch.split(x, self.quantized_vector_size // self.h.n_code_groups, dim=-1)
         min_indicies = []
         z_q = []
-        if idx == 0:
-            for _x, m in zip(x, self.quantizer_modules):
-                _z_q, _min_indicies = m(_x)
-                z_q.append(_z_q)
-                min_indicies.append(_min_indicies)  #B * T,
-            z_q = torch.cat(z_q, -1).reshape(xin.shape)
-            # loss = 0.25 * torch.mean((z_q.detach() - xin) ** 2) + torch.mean((z_q - xin.detach()) ** 2)
-            loss = self.codebook_loss_lambda * torch.mean((z_q - xin.detach()) ** 2) \
-                + self.commitment_loss_lambda * torch.mean((z_q.detach() - xin) ** 2)
-            z_q = xin + (z_q - xin).detach()
-            z_q = z_q.transpose(1, 2)
-            return z_q, loss, min_indicies
-        else:
-            for _x, m in zip(x, self.quantizer_modules2):
-                _z_q, _min_indicies = m(_x)
-                z_q.append(_z_q)
-                min_indicies.append(_min_indicies)  #B * T,
-            z_q = torch.cat(z_q, -1).reshape(xin.shape)
-            # loss = 0.25 * torch.mean((z_q.detach() - xin) ** 2) + torch.mean((z_q - xin.detach()) ** 2)
-            loss = self.codebook_loss_lambda * torch.mean((z_q - xin.detach()) ** 2) \
-                + self.commitment_loss_lambda * torch.mean((z_q.detach() - xin) ** 2)
-            z_q = xin + (z_q - xin).detach()
-            z_q = z_q.transpose(1, 2)
-            return z_q, loss, min_indicies
+        
+        quantizer_block = getattr(self, f"quantizer_blocks_{idx}")
+        for _x, m in zip(x, quantizer_block):
+            _z_q, _min_indicies = m(_x)
+            z_q.append(_z_q)
+            min_indicies.append(_min_indicies)  #B * T,
+        z_q = torch.cat(z_q, -1).reshape(xin.shape)
+        loss = self.codebook_loss_lambda * torch.mean((z_q - xin.detach()) ** 2) \
+            + self.commitment_loss_lambda * torch.mean((z_q.detach() - xin) ** 2)
+        z_q = xin + (z_q - xin).detach()
+        z_q = z_q.transpose(1, 2)
+        return z_q, loss, min_indicies
 
     def forward(self, xin):
         #B, C, T
@@ -497,7 +485,7 @@ class Quantizer(torch.nn.Module):
         residual = xin
         all_losses = []
         all_indices = []
-        for i in range(self.residul_layer):
+        for i in range(self.residual_layer):
             quantized, loss, indices = self.for_one_step(residual, i)  # 
             residual = residual - quantized
             quantized_out = quantized_out + quantized
@@ -507,29 +495,37 @@ class Quantizer(torch.nn.Module):
         loss = torch.mean(all_losses)
         return quantized_out, loss, all_indices
 
-    def embed(self, x):
-        #idx: N, T, 4
-        #print('x ', x.shape)
-        quantized_out = torch.tensor(0.0, device=x.device)
-        x = torch.split(x, 1, 2)  # split, 将最后一个维度分开, 每个属于一个index group
-        #print('x.shape ', len(x),x[0].shape)
-        for i in range(self.residul_layer):
-            ret = []
-            if i == 0:
-                for j in range(self.n_code_groups):
-                    q = x[j]
-                    embed = self.quantizer_modules[j]
-                    q = embed.embedding(q.squeeze(-1))
-                    ret.append(q)
-                ret = torch.cat(ret, -1)
-                #print(ret.shape)
-                quantized_out = quantized_out + ret
-            else:
-                for j in range(self.n_code_groups):
-                    q = x[j + self.n_code_groups]
-                    embed = self.quantizer_modules2[j]
-                    q = embed.embedding(q.squeeze(-1))
-                    ret.append(q)
-                ret = torch.cat(ret, -1)
-                quantized_out = quantized_out + ret
-        return quantized_out.transpose(1, 2)  #N, C, T
+    # # Code not ready to use
+    # def embed(self, x):
+    #     #idx: N, T, 4
+    #     #print('x ', x.shape)
+    #     quantized_out = torch.tensor(0.0, device=x.device)
+    #     print(x.size())
+    #     x = torch.split(x, 1, 2)  # split, 将最后一个维度分开, 每个属于一个index group
+    #     print('x.shape ', len(x),x[0].shape)
+    #     for i in range(self.residual_layer):
+    #         ret = []
+    #         # if i == 0:
+    #         #     for j in range(self.n_code_groups):
+    #         #         q =  x[j]
+    #         #         embed = self.quantizer_modules[j]
+    #         #         q = embed.embedding(q.squeeze(-1))
+    #         #         ret.append(q)
+    #         #     ret = torch.cat(ret, -1)
+    #         #     quantized_out = quantized_out + ret
+    #         # else:
+    #         #     for j in range(self.n_code_groups):
+    #         #         q = x[j + self.n_code_groups]
+    #         #         embed = self.quantizer_modules2[j]
+    #         #         q = embed.embedding(q.squeeze(-1))
+    #         #         ret.append(q)
+    #         #     ret = torch.cat(ret, -1)
+    #         #     quantized_out = quantized_out + ret
+    #         for j in range(self.n_code_groups):
+    #             q =  x[j + i * self.n_code_groups]
+    #             embed = self.quantizer_blocks[j]
+    #             q = embed.embedding(q.squeeze(-1))
+    #             ret.append(q)
+    #         ret = torch.cat(ret, -1)
+    #         quantized_out = quantized_out + ret
+    #     return quantized_out.transpose(1, 2)  #N, C, T
