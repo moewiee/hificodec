@@ -102,6 +102,11 @@ def get_dataset_filelist(a):
     return training_files, validation_files
 
 
+def get_validation_filelist(a):
+    with open(a.input_validation_file, 'r') as f:
+        validation_files = [l.strip() for l in f]
+    return validation_files
+
 class MelDataset(torch.utils.data.Dataset):
     def __init__(self,
                  training_files,
