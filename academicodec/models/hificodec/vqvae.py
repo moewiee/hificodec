@@ -15,18 +15,20 @@ class VQVAE(nn.Module):
                  ckpt_path,
                  with_encoder=False):
         super(VQVAE, self).__init__()
-        ckpt = torch.load(ckpt_path)
         with open(config_path) as f:
             data = f.read()
         json_config = json.loads(data)
         self.h = AttrDict(json_config)
         self.quantizer = Quantizer(self.h)
         self.generator = Generator(self.h)
-        self.generator.load_state_dict(ckpt['generator'])
-        self.quantizer.load_state_dict(ckpt['quantizer'])
+        if ckpt_path:
+            ckpt = torch.load(ckpt_path)
+            self.generator.load_state_dict(ckpt['generator'])
+            self.quantizer.load_state_dict(ckpt['quantizer'])
         if with_encoder:
             self.encoder = Encoder(self.h)
-            self.encoder.load_state_dict(ckpt['encoder'])
+            if ckpt_path:
+                self.encoder.load_state_dict(ckpt['encoder'])
 
     def forward(self, x):
         # x is the codebook
