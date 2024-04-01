@@ -23,9 +23,9 @@
 
     "sampling_rate": 24000,
 
-    "n_code_groups": 2,
     "quantized_vector_size": 128,
-    "n_codebook": 8, 
+    "n_residual_layers": 2,
+    "n_code_groups": 4, 
     "n_codes": 1024,
     "codebook_loss_lambda": 1.0,
     "commitment_loss_lambda": 0.25,

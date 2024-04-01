@@ -3,3 +3,4 @@ outputdir
 __pycache__
 data
 *logs*
+*.wav

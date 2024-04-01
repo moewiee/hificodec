@@ -22,4 +22,4 @@ python ${BIN_DIR}/train.py \
   --validation_interval 10000 \
   --training_epoch 1 \
   --stdout_interval 10 \
-  --pretrain_path /home/ubuntu/tuna/AcademiCodec/egs/HiFi-Codec-24k-320d/HiFi-Codec-24k-320d
+  --pretrain_path ../../ckpt/HiFi-Codec-24k-320d-16cb-128d-80k-steps
