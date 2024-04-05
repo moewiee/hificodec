@@ -205,12 +205,6 @@ def train(rank, a, h):
             y_g_mel_2 = mel_spectrogram(
                 y_g_hat.squeeze(1), 256, h.num_mels, h.sampling_rate, 60, 256,
                 h.fmin, h.fmax_for_loss)
-            y_r_mel_3 = mel_spectrogram(
-                y.squeeze(1), 128, h.num_mels, h.sampling_rate, 30, 128, h.fmin,
-                h.fmax_for_loss)
-            y_g_mel_3 = mel_spectrogram(
-                y_g_hat.squeeze(1), 128, h.num_mels, h.sampling_rate, 30, 128,
-                h.fmin, h.fmax_for_loss)
             optim_d.zero_grad()
 
             # MPD
@@ -238,7 +232,6 @@ def train(rank, a, h):
             # L1 Mel-Spectrogram Loss
             loss_mel1 = F.l1_loss(y_r_mel_1, y_g_mel_1)
             loss_mel2 = F.l1_loss(y_r_mel_2, y_g_mel_2)
-            loss_mel3 = F.l1_loss(y_r_mel_3, y_g_mel_3)
             
             loss_mel = F.l1_loss(y_mel,
                                  y_g_hat_mel) * 45 + loss_mel1 + loss_mel2

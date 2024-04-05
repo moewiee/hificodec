@@ -396,7 +396,7 @@ class Encoder(torch.nn.Module):
                 self.resblocks.append(resblock(h, ch, k, d))
                 self.normalize.append(
                     torch.nn.GroupNorm(ch // 16, ch, eps=1e-6, affine=True))
-        self.conv_post = Conv1d(512, h.quantized_vector_size, 3, 1, padding=1)
+        self.conv_post = Conv1d(32 * (2 ** self.num_upsamples), h.quantized_vector_size, 3, 1, padding=1)
         self.ups.apply(init_weights)
         self.conv_post.apply(init_weights)
 
