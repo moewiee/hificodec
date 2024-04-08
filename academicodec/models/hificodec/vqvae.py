@@ -31,10 +31,14 @@ class VQVAE(nn.Module):
                 self.encoder.load_state_dict(ckpt['encoder'])
 
     def forward(self, x):
-        # x is the codebook
-        # x.shape (B, T, Nq)
-        quant_emb = self.quantizer.embed(x)
-        return self.generator(quant_emb)
+        batch_size = x.size(0)
+        if len(x.shape) == 3 and x.shape[-1] == 1:
+            x = x.squeeze(-1)
+        c = self.encoder(x.unsqueeze(1))
+        q, loss_q, c = self.quantizer(c)
+        y_hat = self.generator(q)
+
+        return y_hat
 
     def encode(self, x):
         batch_size = x.size(0)

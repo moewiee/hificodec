@@ -2,40 +2,40 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 from tqdm import tqdm
-import os
 import argparse
 import json
 import torch
 torch.set_warn_always(False)
-from torch.utils.tensorboard import SummaryWriter
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from academicodec.models.hificodec.env import AttrDict
 from academicodec.models.hificodec.meldataset import MelDataset, mel_spectrogram, get_validation_filelist
-from academicodec.models.hificodec.models import Generator
-from academicodec.models.hificodec.models import Encoder
-from academicodec.models.hificodec.models import Quantizer
-from academicodec.utils import plot_spectrogram
-from academicodec.utils import load_checkpoint
+from academicodec.models.hificodec.vqvae import VQVAE
 
 torch.backends.cudnn.benchmark = True
 
 
-def train(rank, a, h):
+def normalize(spectrogram):
+    min_val = spectrogram.min()
+    max_val = spectrogram.max()
+    normalized_spectrogram = (spectrogram - min_val) / (max_val - min_val)
+
+    return normalized_spectrogram
+
+
+def train(rank, a, h, refiner_h=None):
     torch.cuda.set_device(rank)
 
     torch.cuda.manual_seed(h.seed)
     device = torch.device('cuda:{:d}'.format(rank))
 
-    encoder = Encoder(h).to(device)
-    generator = Generator(h).to(device)
-    quantizer = Quantizer(h).to(device)
+    base_model = VQVAE(a.config, a.pretrained_path, with_encoder=True).to(device)
+    base_model.eval()
 
-    state_dict_g = load_checkpoint(a.pretrained_path, device)
-    generator.load_state_dict(state_dict_g['generator'])
-    encoder.load_state_dict(state_dict_g['encoder'])
-    quantizer.load_state_dict(state_dict_g['quantizer'])
+    if refiner_h is not None:
+        refiner_model = VQVAE(a.refiner_config, a.refiner_path, with_encoder=True).to(device)
+        refiner_model.eval()
 
     validation_filelist = get_validation_filelist(a)
 
@@ -59,59 +59,63 @@ def train(rank, a, h):
         base_mels_path=None)
     validation_loader = DataLoader(
         validset,
-        num_workers=16,
+        num_workers=1,
         shuffle=False,
         sampler=None,
-        batch_size=128,
+        batch_size=1,
         pin_memory=True,
         drop_last=False)
 
     # Validation
-    generator.eval()
-    encoder.eval()
-    quantizer.eval()
-    val_err_tot = 0
-    sw = SummaryWriter(a.pretrained_path + "_samples")
+    base_f1 = 0
+    base_mse = 0
+    refined_f1 = 0
+    refined_mse = 0
+
     with torch.no_grad():
         for j, batch in enumerate(tqdm(validation_loader)):
             x, y, _, y_mel = batch
-            c = encoder(y.to(device).unsqueeze(1))
-            q, loss_q, c = quantizer(c)
-            y_g_hat = generator(q)
+            y_g_hat = base_model(y.to(device))
             y_mel = torch.autograd.Variable(y_mel.to(device))
             y_g_hat_mel = mel_spectrogram(
                 y_g_hat.squeeze(1), h.n_fft, h.num_mels,
                 h.sampling_rate, h.hop_size, h.win_size, h.fmin,
                 h.fmax_for_loss)
             i_size = min(y_mel.size(2), y_g_hat_mel.size(2))
-            val_err_tot += F.l1_loss(
-                y_mel[:, :, :i_size],
-                y_g_hat_mel[:, :, :i_size]).item()
+            base_f1 += F.l1_loss(
+                normalize(y_mel[:, :, :i_size]),
+                normalize(y_g_hat_mel[:, :, :i_size])).item()
+            base_mse += F.mse_loss(
+                    normalize(y_mel[:, :, :i_size]),
+                    normalize(y_g_hat_mel[:, :, :i_size])).item()
 
-            if j <= 8:
-                sw.add_audio('gt/y_{}'.format(j), y[0],
-                                0, h.sampling_rate)
-                sw.add_figure('gt/y_spec_{}'.format(j),
-                                plot_spectrogram(x[0]), 0)
-
-                sw.add_audio('generated/y_hat_{}'.format(j),
-                                y_g_hat[0], 0, h.sampling_rate)
-                y_hat_spec = mel_spectrogram(
+            if refiner_h:
+                y_g_hat = refiner_model(y_g_hat.squeeze(1))
+                y_g_hat_mel = mel_spectrogram(
                     y_g_hat.squeeze(1), h.n_fft, h.num_mels,
-                    h.sampling_rate, h.hop_size, h.win_size,
-                    h.fmin, h.fmax)
-                sw.add_figure(
-                    'generated/y_hat_spec_{}'.format(j),
-                    plot_spectrogram(
-                        y_hat_spec[0].cpu().numpy()),
-                    0)
+                    h.sampling_rate, h.hop_size, h.win_size, h.fmin,
+                    h.fmax_for_loss)
+                refined_f1 += F.l1_loss(
+                    normalize(y_mel[:, :, :i_size]),
+                    normalize(y_g_hat_mel[:, :, :i_size])).item()
+                refined_mse += F.mse_loss(
+                    normalize(y_mel[:, :, :i_size]),
+                    normalize(y_g_hat_mel[:, :, :i_size])).item()
 
-        val_err = val_err_tot / (j + 1)
-        print(val_err)
+        base_f1 = base_f1 / (j + 1)
+        base_mse = base_mse / (j + 1)
+        print(f"Base F1 : {base_f1:.4f}")
+        print(f"Base MSE: {base_mse:.4f}")
+
+        if refiner_h:
+            refined_f1 = refined_f1 / (j + 1)
+            refined_mse = refined_mse / (j + 1)
+            print(f"Refined F1 : {refined_f1:.4f}")
+            print(f"Refined MSE: {refined_mse:.4f}")
 
 
 def main():
-    print('Initializing Training Process..')
+    print('Initializing Evaluation Process..')
 
     parser = argparse.ArgumentParser()
 
@@ -119,6 +123,8 @@ def main():
     parser.add_argument('--input_hash_file', required=True)
     parser.add_argument('--pretrained_path', required=True)
     parser.add_argument('--config', required=True)
+    parser.add_argument('--refiner_config', default='', required=False)
+    parser.add_argument('--refiner_path', default='', required=False)
 
     a = parser.parse_args()
 
@@ -128,7 +134,19 @@ def main():
     json_config = json.loads(data)
     h = AttrDict(json_config)
 
-    train(0, a, h)
+    if a.refiner_config != '':
+        with open(a.refiner_config) as f:
+            data = f.read()
+
+        json_config = json.loads(data)
+        h_refiner = AttrDict(json_config)
+
+        if a.refiner_path == '':
+            raise ValueError('Refiner path is required when refiner config is provided')
+    else:
+        h_refiner = None
+
+    train(0, a, h, h_refiner)
 
 
 if __name__ == '__main__':
