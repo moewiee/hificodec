@@ -145,9 +145,7 @@ class Generator(torch.nn.Module):
                         h.upsample_initial_channel // (2**(i + 1)),
                         k,
                         u,
-                        # padding=(u//2 + u%2),
                         padding=(k - u) // 2,
-                        # output_padding=u%2
                     )))
 
         self.resblocks = nn.ModuleList()
@@ -384,7 +382,6 @@ class Encoder(torch.nn.Module):
                         k,
                         u,
                         padding=((k - u) // 2)
-                        # padding=(u//2 + u%2)
                     )))
         self.resblocks = nn.ModuleList()
         for i in range(len(self.ups)):
@@ -494,3 +491,32 @@ class Quantizer(torch.nn.Module):
         all_losses = torch.stack(all_losses)
         loss = torch.mean(all_losses)
         return quantized_out, loss, all_indices
+
+    def embed(self, x):
+        '''
+        Input quantizer index, output quantized vector
+        Input shape: N, T x Nq
+        Output shape: N, self.quantized_vector_size
+        '''
+
+        quantized_batch = []
+        batch_size = x.size(0)
+        x = x.reshape((batch_size, -1, self.residual_layer, self.n_code_groups)) # batch_size, n_timestep, n_layer, n_code_groups
+        n_timestep = x.size(1)
+        for b in range(batch_size):
+            timestep_out = []
+            for t in range(n_timestep):
+                quantized_out = torch.tensor(0.0, device=x.device) # quantized vector placeholder
+                for i in range(self.residual_layer):
+                    quantized_layer = []
+                    quantizer_block = getattr(self, f"quantizer_blocks_{i}")
+                    for j, m in enumerate(quantizer_block): # m is quantizer module
+                        _z_q = m.embedding(x[b, t, i, j])
+                        quantized_layer.append(_z_q)
+                    quantized_layer = torch.cat(quantized_layer, -1)
+                    quantized_out = quantized_out + quantized_layer
+                timestep_out.append(quantized_out)
+            timestep_out = torch.stack(timestep_out)
+            quantized_batch.append(timestep_out)
+        
+        return torch.stack(quantized_batch)

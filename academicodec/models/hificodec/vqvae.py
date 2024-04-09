@@ -31,6 +31,7 @@ class VQVAE(nn.Module):
                 self.encoder.load_state_dict(ckpt['encoder'])
 
     def forward(self, x):
+        '''Reconstruct the input wav. Input wav, output reconstructed similar wav'''
         batch_size = x.size(0)
         if len(x.shape) == 3 and x.shape[-1] == 1:
             x = x.squeeze(-1)
@@ -40,11 +41,23 @@ class VQVAE(nn.Module):
 
         return y_hat
 
-    def encode(self, x):
+    def to_acoustic_token(self, x):
+        '''Input wav, output acoustic tokens'''
+
         batch_size = x.size(0)
         if len(x.shape) == 3 and x.shape[-1] == 1:
             x = x.squeeze(-1)
         c = self.encoder(x.unsqueeze(1))
         q, loss_q, c = self.quantizer(c)
         c = [code.reshape(batch_size, -1) for code in c]
-        return torch.stack(c, -1)
+        c = torch.stack(c, -1)
+
+        return c
+
+    def to_wav(self, x):
+        '''Input acoutic tokens, output wav'''
+        quantized_vector = self.quantizer.embed(x)
+        quantized_vector = quantized_vector.transpose(1, 2)
+        y_hat = self.generator(quantized_vector)
+
+        return y_hat
