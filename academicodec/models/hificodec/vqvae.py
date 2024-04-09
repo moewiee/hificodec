@@ -30,18 +30,7 @@ class VQVAE(nn.Module):
             if ckpt_path:
                 self.encoder.load_state_dict(ckpt['encoder'])
 
-    def forward(self, x):
-        '''Reconstruct the input wav. Input wav, output reconstructed similar wav'''
-        batch_size = x.size(0)
-        if len(x.shape) == 3 and x.shape[-1] == 1:
-            x = x.squeeze(-1)
-        c = self.encoder(x.unsqueeze(1))
-        q, loss_q, c = self.quantizer(c)
-        y_hat = self.generator(q)
-
-        return y_hat
-
-    def to_acoustic_token(self, x):
+    def wav_to_acoustic_token(self, x):
         '''Input wav, output acoustic tokens'''
 
         batch_size = x.size(0)
@@ -54,10 +43,25 @@ class VQVAE(nn.Module):
 
         return c
 
-    def to_wav(self, x):
+    def wav_to_text_target(self, x):
+        '''Input wav, output target sequence for text encoder'''
+
+        c = self.to_acoustic_token(x)
+        batch_size = c.size(0)
+
+        return c.reshape(batch_size, -1)
+
+    def acoustic_token_to_wav(self, x):
         '''Input acoutic tokens, output wav'''
         quantized_vector = self.quantizer.embed(x)
         quantized_vector = quantized_vector.transpose(1, 2)
         y_hat = self.generator(quantized_vector)
+
+        return y_hat
+
+    def forward(self, x):
+        '''Reconstruct the input wav. Input wav, output reconstructed similar wav'''
+        c = self.to_acoustic_token(x)
+        y_hat = self.to_wav(c)
 
         return y_hat
