@@ -37,7 +37,7 @@ class VQVAE(nn.Module):
         if len(x.shape) == 3 and x.shape[-1] == 1:
             x = x.squeeze(-1)
         c = self.encoder(x.unsqueeze(1))
-        q, loss_q, c = self.quantizer(c)
+        _, _, c = self.quantizer(c)
         c = [code.reshape(batch_size, -1) for code in c]
         c = torch.stack(c, -1)
 
@@ -46,7 +46,7 @@ class VQVAE(nn.Module):
     def wav_to_text_target(self, x):
         '''Input wav, output target sequence for text encoder'''
 
-        c = self.to_acoustic_token(x)
+        c = self.wav_to_acoustic_token(x)
         batch_size = c.size(0)
 
         return c.reshape(batch_size, -1)
@@ -59,9 +59,37 @@ class VQVAE(nn.Module):
 
         return y_hat
 
+    def text_target_to_wav(self, x):
+        '''
+        Input target sequence for text encoder, output wav
+        Input shape: B, T*n_layers*n_codegroup
+        '''
+        
+        batch_size = x.size(0)
+        c = x.reshape(batch_size, -1, self.quantizer.n_code_groups * self.quantizer.residual_layer)
+        q = self.quantizer.embed(c)
+        q = q.transpose(1, 2)
+        y_hat = self.generator(q)
+
+        return y_hat
+
+    def text_target_to_latent_image(self, x):
+        '''
+        Input target sequence for text encoder, output latent image
+        Input shape: B, T*n_layers*n_codegroup
+        Output shape: B, D, T
+        '''
+        
+        batch_size = x.size(0)
+        c = x.reshape(batch_size, -1, self.quantizer.n_code_groups * self.quantizer.residual_layer)
+        q = self.quantizer.embed(c)
+        q = q.transpose(1, 2)
+
+        return q
+
     def forward(self, x):
         '''Reconstruct the input wav. Input wav, output reconstructed similar wav'''
-        c = self.to_acoustic_token(x)
-        y_hat = self.to_wav(c)
+        c = self.wav_to_acoustic_token(x)
+        y_hat = self.acoustic_token_to_wav(c)
 
         return y_hat
