@@ -1,7 +1,7 @@
 {
     "resblock": "1",
     "num_gpus": 8,
-    "batch_size": 128,
+    "batch_size": 64,
     "learning_rate": 0.0001,
     "adam_b1": 0.5,
     "adam_b2": 0.9,
@@ -23,10 +23,10 @@
 
     "sampling_rate": 24000,
 
-    "quantized_vector_size": 96,
+    "quantized_vector_size": 128,
     "n_residual_layers": 2,
-    "n_code_groups": 2, 
-    "n_codes": 8192,
+    "n_code_groups": 1, 
+    "n_codes": 4096,
     "codebook_loss_lambda": 1.0,
     "commitment_loss_lambda": 0.25,
 

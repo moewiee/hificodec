@@ -2,7 +2,7 @@
 source path.sh
 set -e
 
-input_validation_file="../../data/valid_en_hash.lst"
+input_validation_file="../../data/valid.lst"
 input_hash_file="../../data/en_hash.json"
 
 echo "Eval model..."
@@ -11,4 +11,4 @@ python ${BIN_DIR}/evaluate.py \
 --config config_24k_320d.json \
 --input_validation_file ${input_validation_file} \
 --input_hash_file ${input_hash_file} \
---pretrained_path 93m_128d_8cb_70k_steps
+--pretrained_path /home/ubuntu/tuna/AcademiCodec/egs/HiFi-Codec-24k-320d/93m_logs_8cb/g_00230000

@@ -34,7 +34,7 @@ from academicodec.utils import save_checkpoint
 torch.backends.cudnn.benchmark = True
 
 
-def train(rank, a, h):
+def train(rank, a, h, pretrained_h):
     torch.cuda.set_device(rank)
     if h.num_gpus > 1:
         init_process_group(
@@ -45,6 +45,10 @@ def train(rank, a, h):
 
     torch.cuda.manual_seed(h.seed)
     device = torch.device('cuda:{:d}'.format(rank))
+
+    base_encoder = Encoder(pretrained_h).to(device)
+    base_generator = Generator(pretrained_h).to(device)
+    base_quantizer = Quantizer(pretrained_h).to(device)
 
     encoder = Encoder(h).to(device)
     generator = Generator(h).to(device)
@@ -102,29 +106,43 @@ def train(rank, a, h):
             steps = state_dict_do['steps'] + 1
             last_epoch = state_dict_do['epoch']
 
-    if a.pretrain_path:
-        state_dict_pretrain = load_checkpoint(a.pretrain_path, device)
+    state_dict_pretrain = load_checkpoint(a.pretrain_path, device)
+
+    base_generator.load_state_dict(state_dict_pretrain['generator'])
+    base_generator.eval()
+    print(f'Generator loaded from {a.pretrain_path}.')
+    
+    base_encoder.load_state_dict(state_dict_pretrain['encoder'])
+    base_encoder.eval()
+    print(f'Encoder loaded from {a.pretrain_path}.')
+    
+    base_quantizer.load_state_dict(state_dict_pretrain['quantizer'])
+    base_quantizer.eval()
+    print(f'Quantizer loaded from {a.pretrain_path}.')
+
+    if a.refiner_pretrain_path:
+        state_dict_pretrain = load_checkpoint(a.refiner_pretrain_path, device)
         if 'generator' in state_dict_pretrain.keys():
             cmd = generator.state_dict()
             lsd = state_dict_pretrain['generator']
             nsd={k:v if v.size() == cmd[k].size() else cmd[k] for k,v in zip(cmd.keys(), lsd.values())}
             
             generator.load_state_dict(nsd, strict=False)
-            print(f'Generator loaded from {a.pretrain_path}.')
+            print(f'Generator loaded from {a.refiner_pretrain_path}.')
         if 'encoder' in state_dict_pretrain.keys():
             cmd = encoder.state_dict()
             lsd = state_dict_pretrain['encoder']
             nsd={k:v if v.size() == cmd[k].size() else cmd[k] for k,v in zip(cmd.keys(), lsd.values())}
             
             encoder.load_state_dict(nsd, strict=False)
-            print(f'Encoder loaded from {a.pretrain_path}.')
+            print(f'Encoder loaded from {a.refiner_pretrain_path}.')
         if 'quantizer' in state_dict_pretrain.keys():
             cmd = quantizer.state_dict()
             lsd = state_dict_pretrain['quantizer']
             nsd={k:v if v.size() == cmd[k].size() else cmd[k] for k,v in zip(cmd.keys(), lsd.values())}
             
             quantizer.load_state_dict(nsd, strict=False)
-            print(f'Quantizer loaded from {a.pretrain_path}.')
+            print(f'Quantizer loaded from {a.refiner_pretrain_path}.')
         
 
     if h.num_gpus > 1:
@@ -209,7 +227,12 @@ def train(rank, a, h):
             y_mel = torch.autograd.Variable(y_mel.to(device, non_blocking=True))
             y = y.unsqueeze(1)
 
-            c = encoder(y)
+            with torch.no_grad():
+                base_c = base_encoder(y)
+                base_q, _, _ = base_quantizer(base_c)
+                base_y_g_hat = base_generator(base_q)
+
+            c = encoder(base_y_g_hat)
             
             q, loss_q, c = quantizer(c)
             
@@ -338,11 +361,11 @@ def main():
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--input_mels_dir', default=None)
     parser.add_argument('--input_training_file', required=True)
     parser.add_argument('--input_validation_file', required=True)
     parser.add_argument('--input_hash_file', required=True)
     parser.add_argument('--checkpoint_path', default='checkpoints')
+    parser.add_argument('--pretrained_config', required=True)
     parser.add_argument('--config', default='')
     parser.add_argument('--training_epochs', default=2, type=int)
     parser.add_argument('--stdout_interval', default=20, type=int)
@@ -350,7 +373,8 @@ def main():
     parser.add_argument('--summary_interval', default=100, type=int)
     parser.add_argument('--validation_interval', default=5000, type=int)
     parser.add_argument('--num_ckpt_keep', default=100, type=int)
-    parser.add_argument('--pretrain_path', default='', type=str)
+    parser.add_argument('--pretrain_path', type=str, required=True)
+    parser.add_argument('--refiner_pretrain_path', default='', type=str, required=False)
     parser.add_argument('--continue_optim', action='store_true')
 
     a = parser.parse_args()
@@ -362,6 +386,11 @@ def main():
     h = AttrDict(json_config)
     build_env(a.config, 'config.json', a.checkpoint_path)
 
+    with open(a.pretrained_config) as f:
+        data = f.read()
+    pretrained_json_config = json.loads(data)
+    pretrained_h = AttrDict(pretrained_json_config)
+
     torch.manual_seed(h.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(h.seed)
@@ -372,9 +401,9 @@ def main():
         pass
 
     if h.num_gpus > 1:
-        mp.spawn(train, nprocs=h.num_gpus, args=(a, h, ))
+        mp.spawn(train, nprocs=h.num_gpus, args=(a, h, pretrained_h, ))
     else:
-        train(0, a, h)
+        train(0, a, h, pretrained_h)
 
 
 if __name__ == '__main__':
